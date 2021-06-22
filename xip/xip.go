@@ -5,7 +5,9 @@ package xip
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,72 +43,43 @@ var (
 	// https://stackoverflow.com/questions/53497/regular-expression-that-matches-valid-ipv6-addresses
 	ipv6RE           = regexp.MustCompile(`(^|[.-])(([0-9a-fA-F]{1,4}-){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}-){1,7}-|([0-9a-fA-F]{1,4}-){1,6}-[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}-){1,5}(-[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}-){1,4}(-[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}-){1,3}(-[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}-){1,2}(-[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}-((-[0-9a-fA-F]{1,4}){1,6})|-((-[0-9a-fA-F]{1,4}){1,7}|-)|fe80-(-[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|--(ffff(-0{1,4})?-)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|([0-9a-fA-F]{1,4}-){1,4}-((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))($|[.-])`)
 	dns01ChallengeRE = regexp.MustCompile(`(?i)_acme-challenge\.`)
-	nsAws, _         = dnsmessage.NewName("ns-aws.nono.io.")
-	nsAzure, _       = dnsmessage.NewName("ns-azure.nono.io.")
-	nsGce, _         = dnsmessage.NewName("ns-gce.nono.io.")
-	NameServers      = []dnsmessage.NSResource{
-		{NS: nsAws},
-		{NS: nsAzure},
-		{NS: nsGce},
+
+	ns1Name     = os.Getenv("WILD_NS1")
+	ns2Name     = os.Getenv("WILD_NS2")
+	ns3Name     = os.Getenv("WILD_NS3")
+	ns1IP       = os.Getenv("WILD_NS1_IP")
+	ns2IP       = os.Getenv("WILD_NS2_IP")
+	ns3IP       = os.Getenv("WILD_NS3_IP")
+	ns1, _      = dnsmessage.NewName(ns1Name)
+	ns2, _      = dnsmessage.NewName(ns2Name)
+	ns3, _      = dnsmessage.NewName(ns3Name)
+	NameServers = []dnsmessage.NSResource{
+		{NS: ns1},
+		{NS: ns2},
+		{NS: ns3},
 	}
 
-	mbox, _        = dnsmessage.NewName("briancunnie.gmail.com.")
-	mx1, _         = dnsmessage.NewName("mail.protonmail.ch.")
-	mx2, _         = dnsmessage.NewName("mailsec.protonmail.ch.")
-	dkim1, _       = dnsmessage.NewName("protonmail.domainkey.dw4gykv5i2brtkjglrf34wf6kbxpa5hgtmg2xqopinhgxn5axo73a.domains.proton.ch.")
-	dkim2, _       = dnsmessage.NewName("protonmail2.domainkey.dw4gykv5i2brtkjglrf34wf6kbxpa5hgtmg2xqopinhgxn5axo73a.domains.proton.ch.")
-	dkim3, _       = dnsmessage.NewName("protonmail3.domainkey.dw4gykv5i2brtkjglrf34wf6kbxpa5hgtmg2xqopinhgxn5axo73a.domains.proton.ch.")
+	mbox, _        = dnsmessage.NewName(fmt.Sprintf("nop.%s", domain))
+	domain         = os.Getenv("WILD_DOMAIN")
 	Customizations = DomainCustomizations{
-		"sslip.io.": {
-			A: []dnsmessage.AResource{
-				{A: [4]byte{78, 46, 204, 247}},
-			},
-			AAAA: []dnsmessage.AAAAResource{
-				{AAAA: [16]byte{42, 1, 4, 248, 12, 23, 11, 143, 0, 0, 0, 0, 0, 0, 0, 2}},
-			},
-			MX: []dnsmessage.MXResource{
-				{
-					Pref: 10,
-					MX:   mx1,
-				},
-				{
-					Pref: 20,
-					MX:   mx2,
-				},
-			},
-			// Although multiple TXT records with multiple strings are allowed, we're sticking
-			// with a multiple TXT records with a single string apiece because that's what ProtonMail requires
-			// and that's what google.com does.
-			TXT: []dnsmessage.TXTResource{
-				{TXT: []string{"protonmail-verification=ce0ca3f5010aa7a2cf8bcc693778338ffde73e26"}}, // ProtonMail verification; don't delete
-				{TXT: []string{"v=spf1 include:_spf.protonmail.ch mx ~all"}},                        // Sender Policy Framework
-			},
-		},
+		domain: {A: []dnsmessage.AResource{{A: [4]byte{127, 0, 0, 1}}}},
 		// nameserver addresses; we get queries for those every once in a while
-		"ns-aws.nono.io.": {
-			A:    []dnsmessage.AResource{{A: [4]byte{52, 0, 56, 137}}},
-			AAAA: []dnsmessage.AAAAResource{{AAAA: [16]byte{0x26, 0, 0x1f, 0x18, 0x0a, 0xaf, 0x69, 0, 0, 0, 0, 0, 0, 0, 0, 0xa}}},
-		},
-		"ns-azure.nono.io.": {A: []dnsmessage.AResource{{A: [4]byte{52, 187, 42, 158}}}},
-		"ns-gce.nono.io.":   {A: []dnsmessage.AResource{{A: [4]byte{104, 155, 144, 4}}}},
-		// CNAMEs for sslip.io for DKIM signing
-		"protonmail._domainkey.sslip.io.": {
-			CNAME: dnsmessage.CNAMEResource{
-				CNAME: dkim1,
-			},
-		},
-		"protonmail2._domainkey.sslip.io.": {
-			CNAME: dnsmessage.CNAMEResource{
-				CNAME: dkim2,
-			},
-		},
-		"protonmail3._domainkey.sslip.io.": {
-			CNAME: dnsmessage.CNAMEResource{
-				CNAME: dkim3,
-			},
-		},
+		ns1Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
+		ns2Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
+		ns3Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
 	}
 )
+
+func ipToByte(ipString string) [4]byte {
+	octets := strings.Split(ipString, ".")
+
+	octet0, _ := strconv.Atoi(octets[0])
+	octet1, _ := strconv.Atoi(octets[1])
+	octet2, _ := strconv.Atoi(octets[2])
+	octet3, _ := strconv.Atoi(octets[3])
+
+	return [4]byte{byte(octet0), byte(octet1), byte(octet2), byte(octet3)}
+}
 
 // Response Why do I have a crazy struct of fields of arrays of functions?
 // It's because I can't use dnsmessage.Builder as I had hoped; specifically
@@ -383,31 +356,6 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 			// if it's an "_acme-challenge." TXT, we return no answer but an NS authority & not authoritative
 			// if it's customized records, we return them in the Answers
 			// otherwise we return no Answers and Authorities SOA
-			if IsAcmeChallenge(q.Name.String()) {
-				// No Answers, Not Authoritative, Authorities contain NS records
-				response.Header.Authoritative = false
-				nameServers := NSResources(q.Name.String())
-				var logMessages []string
-				for _, nameServer := range nameServers {
-					response.Authorities = append(response.Authorities,
-						// 1 or more A records; A records > 1 only available via Customizations
-						func(b *dnsmessage.Builder) error {
-							err = b.NSResource(dnsmessage.ResourceHeader{
-								Name:   q.Name,
-								Type:   dnsmessage.TypeNS,
-								Class:  dnsmessage.ClassINET,
-								TTL:    604800, // 60 * 60 * 24 * 7 == 1 week; long TTL, these IP addrs don't change
-								Length: 0,
-							}, nameServer)
-							if err != nil {
-								return err
-							}
-							return nil
-						})
-					logMessages = append(logMessages, nameServer.NS.String())
-				}
-				return logMessage + "nil, NS " + strings.Join(logMessages, ", "), nil
-			}
 			var txts []dnsmessage.TXTResource
 			txts = TXTResources(q.Name.String())
 			if len(txts) == 0 {

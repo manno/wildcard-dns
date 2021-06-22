@@ -1,0 +1,13 @@
+export IP=10.10.10.10
+export WILD_NS1=ns1.omg.howdoi.website.
+export WILD_NS2=ns3.omg.howdoi.website.
+export WILD_NS3=ns2.omg.howdoi.website.
+export WILD_NS1_IP=$IP
+export WILD_NS2_IP=$IP
+export WILD_NS3_IP=$IP
+export WILD_DOMAIN=omg.howdoi.website.
+
+
+echo "* modify dnsmasq to point $WILD_DOMAIN to $IP: server=/$WILD_DOMAIN/$IP"
+echo "* restart dnsmasp by killing it..."
+echo "* redirect traffic towards dnsmasq: iptables -t nat -I PREROUTING 1 -p udp -d 8.8.8.8 --dport 53 -j DNAT --to $IP"
