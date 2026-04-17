@@ -6,6 +6,10 @@ export WILD_NS1_IP=$IP
 export WILD_NS2_IP=$IP
 export WILD_NS3_IP=$IP
 export WILD_DOMAIN=omg.howdoi.website.
+# Set to "true" to allow resolving public internet IPs embedded in hostnames.
+# Leave unset (default) to restrict to private/loopback/link-local IPs only,
+# which prevents this server from being used in DNS amplification attacks.
+export WILD_ALLOW_PUBLIC_IPS=false
 
 
 echo "* modify dnsmasq to point $WILD_DOMAIN to $IP: server=/$WILD_DOMAIN/$IP"

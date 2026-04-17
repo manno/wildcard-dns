@@ -6,6 +6,7 @@ package xip
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"regexp"
@@ -38,47 +39,82 @@ type DomainCustomizations map[string]DomainCustomization
 // I don't want to waste time recreating with every function call.
 // But `Customizations` is a true global variable.
 var (
-	ipv4REDots   = regexp.MustCompile(`(^|[.-])(((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))($|[.-])`)
-	ipv4REDashes = regexp.MustCompile(`(^|[.-])(((25[0-5]|(2[0-4]|1?[0-9])?[0-9])-){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))($|[.-])`)
+	ipv4REDots   = regexp.MustCompile(`(^|[.-])(((25[0-5]|(2[0-4]|1\d|[1-9])?\d)\.){3}(25[0-5]|(2[0-4]|1\d|[1-9])?\d))($|[.-])`)
+	ipv4REDashes = regexp.MustCompile(`(^|[.-])(((25[0-5]|(2[0-4]|1\d|[1-9])?\d)-){3}(25[0-5]|(2[0-4]|1\d|[1-9])?\d))($|[.-])`)
 	// https://stackoverflow.com/questions/53497/regular-expression-that-matches-valid-ipv6-addresses
 	ipv6RE           = regexp.MustCompile(`(^|[.-])(([0-9a-fA-F]{1,4}-){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}-){1,7}-|([0-9a-fA-F]{1,4}-){1,6}-[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}-){1,5}(-[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}-){1,4}(-[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}-){1,3}(-[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}-){1,2}(-[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}-((-[0-9a-fA-F]{1,4}){1,6})|-((-[0-9a-fA-F]{1,4}){1,7}|-)|fe80-(-[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|--(ffff(-0{1,4})?-)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|([0-9a-fA-F]{1,4}-){1,4}-((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))($|[.-])`)
 	dns01ChallengeRE = regexp.MustCompile(`(?i)_acme-challenge\.`)
 
-	ns1Name     = os.Getenv("WILD_NS1")
-	ns2Name     = os.Getenv("WILD_NS2")
-	ns3Name     = os.Getenv("WILD_NS3")
-	ns1IP       = os.Getenv("WILD_NS1_IP")
-	ns2IP       = os.Getenv("WILD_NS2_IP")
-	ns3IP       = os.Getenv("WILD_NS3_IP")
-	ns1, _      = dnsmessage.NewName(ns1Name)
-	ns2, _      = dnsmessage.NewName(ns2Name)
-	ns3, _      = dnsmessage.NewName(ns3Name)
+	// allowPublicIPs controls whether IP addresses in the public internet can be resolved.
+	// Set WILD_ALLOW_PUBLIC_IPS=true to enable. Defaults to false to prevent DNS amplification attacks.
+	allowPublicIPs = os.Getenv("WILD_ALLOW_PUBLIC_IPS") == "true"
+
+	domain  = os.Getenv("WILD_DOMAIN")
+	ns1Name = os.Getenv("WILD_NS1")
+	ns2Name = os.Getenv("WILD_NS2")
+	ns3Name = os.Getenv("WILD_NS3")
+	ns1IP   = os.Getenv("WILD_NS1_IP")
+
+	// Initialized in init() after env var validation.
+	mbox           dnsmessage.Name
+	NameServers    []dnsmessage.NSResource
+	Customizations DomainCustomizations
+)
+
+func init() {
+	required := map[string]string{
+		"WILD_DOMAIN": domain,
+		"WILD_NS1":    ns1Name,
+		"WILD_NS2":    ns2Name,
+		"WILD_NS3":    ns3Name,
+		"WILD_NS1_IP": ns1IP,
+	}
+	for name, val := range required {
+		if val == "" {
+			log.Fatalf("required environment variable %s is not set; see .envrc.template", name)
+		}
+	}
+
+	var err error
+	var ns1, ns2, ns3 dnsmessage.Name
+	if ns1, err = dnsmessage.NewName(ns1Name); err != nil {
+		log.Fatalf("WILD_NS1 %q is not a valid DNS name: %v", ns1Name, err)
+	}
+	if ns2, err = dnsmessage.NewName(ns2Name); err != nil {
+		log.Fatalf("WILD_NS2 %q is not a valid DNS name: %v", ns2Name, err)
+	}
+	if ns3, err = dnsmessage.NewName(ns3Name); err != nil {
+		log.Fatalf("WILD_NS3 %q is not a valid DNS name: %v", ns3Name, err)
+	}
+	if mbox, err = dnsmessage.NewName(fmt.Sprintf("nop.%s", domain)); err != nil {
+		log.Fatalf("WILD_DOMAIN %q produced an invalid mailbox name: %v", domain, err)
+	}
+
+	ns1IPBytes, err := ipv4ToBytes(ns1IP)
+	if err != nil {
+		log.Fatalf("WILD_NS1_IP %q is not a valid IPv4 address: %v", ns1IP, err)
+	}
+
 	NameServers = []dnsmessage.NSResource{
 		{NS: ns1},
 		{NS: ns2},
 		{NS: ns3},
 	}
-
-	mbox, _        = dnsmessage.NewName(fmt.Sprintf("nop.%s", domain))
-	domain         = os.Getenv("WILD_DOMAIN")
 	Customizations = DomainCustomizations{
 		domain: {A: []dnsmessage.AResource{{A: [4]byte{127, 0, 0, 1}}}},
 		// nameserver addresses; we get queries for those every once in a while
-		ns1Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
-		ns2Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
-		ns3Name: {A: []dnsmessage.AResource{{A: ipToByte(ns1IP)}}},
+		ns1Name: {A: []dnsmessage.AResource{{A: ns1IPBytes}}},
+		ns2Name: {A: []dnsmessage.AResource{{A: ns1IPBytes}}},
+		ns3Name: {A: []dnsmessage.AResource{{A: ns1IPBytes}}},
 	}
-)
+}
 
-func ipToByte(ipString string) [4]byte {
-	octets := strings.Split(ipString, ".")
-
-	octet0, _ := strconv.Atoi(octets[0])
-	octet1, _ := strconv.Atoi(octets[1])
-	octet2, _ := strconv.Atoi(octets[2])
-	octet3, _ := strconv.Atoi(octets[3])
-
-	return [4]byte{byte(octet0), byte(octet1), byte(octet2), byte(octet3)}
+func ipv4ToBytes(ipString string) ([4]byte, error) {
+	ip := net.ParseIP(ipString).To4()
+	if ip == nil {
+		return [4]byte{}, fmt.Errorf("not a valid IPv4 address: %q", ipString)
+	}
+	return [4]byte{ip[0], ip[1], ip[2], ip[3]}, nil
 }
 
 // Response Why do I have a crazy struct of fields of arrays of functions?
@@ -102,11 +138,12 @@ type Response struct {
 // QueryResponse are not as hard.
 //
 // Examples of log strings returned:
-//   78.46.204.247.33654: TypeA 127-0-0-1.sslip.io ? 127.0.0.1
-//   78.46.204.247.33654: TypeA www.sslip.io ? nil, SOA
-//   78.46.204.247.33654: TypeNS www.example.com ? NS
-//   78.46.204.247.33654: TypeSOA www.example.com ? SOA
-//   2600::.33654: TypeAAAA --1.sslip.io ? ::1
+//
+//	78.46.204.247.33654: TypeA 127-0-0-1.sslip.io ? 127.0.0.1
+//	78.46.204.247.33654: TypeA www.sslip.io ? nil, SOA
+//	78.46.204.247.33654: TypeNS www.example.com ? NS
+//	78.46.204.247.33654: TypeSOA www.example.com ? SOA
+//	2600::.33654: TypeAAAA --1.sslip.io ? ::1
 func QueryResponse(queryBytes []byte, sourceAddr net.IP) (responseBytes []byte, logMessage string, err error) {
 	var queryHeader dnsmessage.Header
 	var p dnsmessage.Parser
@@ -177,8 +214,7 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 	switch q.Type {
 	case dnsmessage.TypeA:
 		{
-			var nameToAs []dnsmessage.AResource
-			nameToAs = NameToA(q.Name.String())
+			nameToAs := NameToA(q.Name.String())
 			if len(nameToAs) == 0 {
 				// No Answers, only 1 Authorities
 				soaHeader, soaResource := SOAAuthority(q.Name)
@@ -217,8 +253,7 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 		}
 	case dnsmessage.TypeAAAA:
 		{
-			var nameToAAAAs []dnsmessage.AAAAResource
-			nameToAAAAs = NameToAAAA(q.Name.String())
+			nameToAAAAs := NameToAAAA(q.Name.String())
 			if len(nameToAAAAs) == 0 {
 				// No Answers, only 1 Authorities
 				soaHeader, soaResource := SOAAuthority(q.Name)
@@ -266,8 +301,7 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 	case dnsmessage.TypeCNAME:
 		{
 			// If there is a CNAME, there can only be 1, and only from Customizations
-			var cname *dnsmessage.CNAMEResource
-			cname = CNAMEResource(q.Name.String())
+			cname := CNAMEResource(q.Name.String())
 			if cname == nil {
 				// No Answers, only 1 Authorities
 				soaHeader, soaResource := SOAAuthority(q.Name)
@@ -383,10 +417,7 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 				})
 			var logMessageTXTss []string
 			for _, txt := range txts {
-				var logMessageTXTs []string
-				for _, TXTstring := range txt.TXT {
-					logMessageTXTs = append(logMessageTXTs, TXTstring)
-				}
+				logMessageTXTs := append([]string(nil), txt.TXT...)
 				logMessageTXTss = append(logMessageTXTss, `["`+strings.Join(logMessageTXTs, `", "`)+`"]`)
 			}
 			return logMessage + strings.Join(logMessageTXTss, ", "), nil
@@ -407,8 +438,6 @@ func processQuestion(q dnsmessage.Question, response *Response, sourceAddr net.I
 			return logMessage + "nil, SOA " + soaLogMessage(soaResource), nil
 		}
 	}
-	// The following is flagged as "Unreachable code" in Goland, and that's expected
-	return "", errors.New("unexpectedly fell through processQuestion()")
 }
 
 // NSResponse sets the Answers/Authorities depending whether we're delegating or authoritative
@@ -513,6 +542,35 @@ func ResponseHeader(query dnsmessage.Header, rcode dnsmessage.RCode) dnsmessage.
 }
 
 // NameToA returns an []AResource that matched the hostname
+// IsPublic returns true if the IP is routable on the public internet.
+// Private, loopback, link-local, and CG-NAT ranges all return false.
+func IsPublic(ip net.IP) bool {
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		// CG-NAT 100.64.0.0/10
+		if ip4[0] == 100 && ip4[1]&0xc0 == 64 {
+			return false
+		}
+		return true
+	}
+	// IPv4/IPv6 Translation 64:ff9b:1::/48
+	if ip[0] == 0 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b &&
+		ip[4] == 0 && ip[5] == 1 {
+		return false
+	}
+	// Teredo/ORCHIDv2 2001::/32 and 2001:20::/28
+	if ip[0] == 0x20 && ip[1] == 1 && ip[2] == 0 && ip[3]&0xf0 == 0x20 {
+		return false
+	}
+	// Documentation 2001:db8::/32
+	if ip[0] == 0x20 && ip[1] == 1 && ip[2] == 0x0d && ip[3] == 0xb8 {
+		return false
+	}
+	return true
+}
+
 func NameToA(fqdnString string) []dnsmessage.AResource {
 	fqdn := []byte(fqdnString)
 	// is it a customized A record? If so, return early
@@ -522,8 +580,14 @@ func NameToA(fqdnString string) []dnsmessage.AResource {
 	for _, ipv4RE := range []*regexp.Regexp{ipv4REDashes, ipv4REDots} {
 		if ipv4RE.Match(fqdn) {
 			match := string(ipv4RE.FindSubmatch(fqdn)[2])
-			match = strings.Replace(match, "-", ".", -1)
+			match = strings.ReplaceAll(match, "-", ".")
 			ipv4address := net.ParseIP(match).To4()
+			if ipv4address == nil {
+				return []dnsmessage.AResource{}
+			}
+			if !allowPublicIPs && IsPublic(ipv4address) {
+				return []dnsmessage.AResource{}
+			}
 			return []dnsmessage.AResource{
 				{A: [4]byte{ipv4address[0], ipv4address[1], ipv4address[2], ipv4address[3]}},
 			}
@@ -545,17 +609,18 @@ func NameToAAAA(fqdnString string) []dnsmessage.AAAAResource {
 
 	ipv6RE.Longest()
 	match := string(ipv6RE.FindSubmatch(fqdn)[2])
-	match = strings.Replace(match, "-", ":", -1)
+	match = strings.ReplaceAll(match, "-", ":")
 	ipv16address := net.ParseIP(match).To16()
 	if ipv16address == nil {
 		// We shouldn't reach here because `match` should always be valid, but we're not optimists
 		return []dnsmessage.AAAAResource{}
 	}
+	if !allowPublicIPs && IsPublic(ipv16address) {
+		return []dnsmessage.AAAAResource{}
+	}
 
 	AAAAR := dnsmessage.AAAAResource{}
-	for i := range ipv16address {
-		AAAAR.AAAA[i] = ipv16address[i]
-	}
+	copy(AAAAR.AAAA[:], ipv16address)
 	return []dnsmessage.AAAAResource{AAAAR}
 }
 
@@ -584,8 +649,12 @@ func MXResources(fqdnString string) []dnsmessage.MXResource {
 
 func IsAcmeChallenge(fqdnString string) bool {
 	if dns01ChallengeRE.MatchString(fqdnString) {
+		// bypass public IP filter: ACME challenges must work for all IPs
+		saved := allowPublicIPs
+		allowPublicIPs = true
 		ipv4s := NameToA(fqdnString)
 		ipv6s := NameToAAAA(fqdnString)
+		allowPublicIPs = saved
 		if len(ipv4s) > 0 || len(ipv6s) > 0 {
 			return true
 		}

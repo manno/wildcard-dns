@@ -76,7 +76,9 @@ func readFrom(conn *net.UDPConn, wg *sync.WaitGroup) {
 				log.Println(err.Error())
 				return
 			}
-			_, err = conn.WriteToUDP(response, addr)
+			if _, err = conn.WriteToUDP(response, addr); err != nil {
+				log.Println(err.Error())
+			}
 			log.Printf("%v.%d %s", addr.IP, addr.Port, logMessage)
 		}()
 	}
